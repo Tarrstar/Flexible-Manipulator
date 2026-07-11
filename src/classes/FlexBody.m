@@ -10,6 +10,7 @@ classdef FlexBody < handle
         u0
         S
         weights
+        rhoWeights
 
         nGauss
         nEta
@@ -17,6 +18,7 @@ classdef FlexBody < handle
         S_bar
         S_t0
         M_ff
+        shapeProducts
 
         K_ff
         D_ff
@@ -25,6 +27,9 @@ classdef FlexBody < handle
     methods
         function obj = FlexBody(params)
         %FLEXBODY Construct a spatial FFRF flexible body.
+        % params.S(:, :, g) maps flexible coordinates to displacement at point g.
+        % It can contain FE, modal, or CB-reduced shape data.
+        % Use params.weights with params.density, or params.massWeights = rho*dV.
 
             if nargin == 0
                 return;
@@ -34,7 +39,7 @@ classdef FlexBody < handle
                 error('Input params must be a struct.');
             end
 
-            requiredFields = {'density', 'u0', 'S', 'weights'};
+            requiredFields = {'u0', 'S'};
 
             for k = 1:numel(requiredFields)
                 if ~isfield(params, requiredFields{k})
@@ -42,19 +47,8 @@ classdef FlexBody < handle
                 end
             end
 
-            if ~isnumeric(params.density) || ...
-                    ~isreal(params.density) || ...
-                    ~isscalar(params.density) || ...
-                    ~isfinite(params.density) || ...
-                    params.density <= 0
-                error('params.density must be a positive finite scalar.');
-            end
-
-            obj.density = params.density;
-
             obj.u0 = params.u0;
             obj.S = params.S;
-            obj.weights = params.weights(:);
 
             if ~isnumeric(obj.u0) || ~isreal(obj.u0) || ...
                     size(obj.u0, 1) ~= 3 || ...
@@ -67,7 +61,8 @@ classdef FlexBody < handle
                 error('params.S must be finite and real.');
             end
 
-            % Allow one Gauss point: S is 3 x nEta.
+            % Allow one integration point: S is 3 x nEta.
+            % In general, S(:, :, g) already includes N(x_g), FE/modal/CB maps, etc.
             if ndims(obj.S) == 2
                 obj.S = reshape(obj.S, size(obj.S, 1), ...
                     size(obj.S, 2), 1);
@@ -85,13 +80,7 @@ classdef FlexBody < handle
                        'the number of integration points in params.S.']);
             end
 
-            if numel(obj.weights) ~= obj.nGauss
-                error('params.weights must contain nGauss entries.');
-            end
-
-            if any(~isfinite(obj.weights)) || any(obj.weights <= 0)
-                error('params.weights must contain positive finite values.');
-            end
+            obj.initialize_integration_weights(params);
 
             if isfield(params, 'Kff') && ~isempty(params.Kff)
                 obj.K_ff = params.Kff;
@@ -104,9 +93,11 @@ classdef FlexBody < handle
                     error('params.Kff cannot contain Inf or NaN.');
                 end
 
-                if norm(obj.K_ff - obj.K_ff.', 'fro') > 1e-10
-                    error('params.Kff must be symmetric.');
-                end
+                obj.K_ff = 0.5 * (obj.K_ff + obj.K_ff.');
+
+                % if norm(obj.K_ff - obj.K_ff.', 'fro') > 1e-10
+                %     error('params.Kff must be symmetric.');
+                % end
             else
                 obj.K_ff = zeros(obj.nEta);
             end
@@ -194,27 +185,43 @@ classdef FlexBody < handle
 
         function pre_calculate(obj)
 
-            obj.mass = obj.density * sum(obj.weights);
+            obj.mass = sum(obj.rhoWeights);
 
             obj.S_bar = zeros(3, obj.nEta);
             obj.S_t0 = zeros(3, 1);
-            obj.M_ff = zeros(obj.nEta);
+
+            nAug = obj.nEta + 1;
+            obj.shapeProducts = cell(3, 3);
+
+            for k = 1:3
+                for l = 1:3
+                    obj.shapeProducts{k, l} = zeros(nAug);
+                end
+            end
 
             for g = 1:obj.nGauss
-                wg = obj.weights(g);
+                wg = obj.rhoWeights(g);
 
                 u0g = obj.u0(:, g);
                 Sg = obj.S(:, :, g);
+                Hg = [u0g, Sg];
 
-                obj.S_t0 = obj.S_t0 ...
-                    + obj.density * wg * u0g;
+                obj.S_t0 = obj.S_t0 + wg * u0g;
+                obj.S_bar = obj.S_bar + wg * Sg;
 
-                obj.S_bar = obj.S_bar ...
-                    + obj.density * wg * Sg;
-
-                obj.M_ff = obj.M_ff ...
-                    + obj.density * wg * (Sg.' * Sg);
+                for k = 1:3
+                    for l = 1:3
+                        obj.shapeProducts{k, l} = ...
+                            obj.shapeProducts{k, l} ...
+                            + wg * (Hg(k, :).' * Hg(l, :));
+                    end
+                end
             end
+
+            obj.M_ff = ...
+                obj.shapeProducts{1, 1}(2:end, 2:end) ...
+              + obj.shapeProducts{2, 2}(2:end, 2:end) ...
+              + obj.shapeProducts{3, 3}(2:end, 2:end);
 
             obj.M_ff = 0.5 * (obj.M_ff + obj.M_ff.');
         end
@@ -345,23 +352,13 @@ classdef FlexBody < handle
                 -G_bar.' * I_theta_theta_dot * omega_bar;
         
             % Eq. (5.149), elastic part
-            Qv_f = zeros(obj.nEta, 1);
-        
-            for g = 1:obj.nGauss
-                wg = obj.weights(g);
-        
-                Sg = obj.S(:, :, g);
-        
-                u = obj.u0(:, g) + Sg * eta;
-        
-                uDot = Sg * etaDot;
-        
-                temp = omega_tilde * omega_tilde * u ...
-                     + 2 * omega_tilde * uDot;
-        
-                Qv_f = Qv_f ...
-                    - obj.density * wg * (Sg.' * temp);
-            end
+            qAug = [1; eta];
+            qAugDot = [0; etaDot];
+
+            Qv_f = -obj.contract_shape_products( ...
+                omega_tilde * omega_tilde, qAug) ...
+                - 2 * obj.contract_shape_products( ...
+                omega_tilde, qAugDot);
         
             % Coordinate order: [theta; R; eta]
             Qv = [Qv_theta;
@@ -371,6 +368,85 @@ classdef FlexBody < handle
     end
 
     methods (Access = private)
+        function initialize_integration_weights(obj, params)
+
+            hasMassWeights = isfield(params, 'massWeights') && ...
+                ~isempty(params.massWeights);
+            hasDensityWeights = isfield(params, 'density') && ...
+                ~isempty(params.density) && ...
+                isfield(params, 'weights') && ...
+                ~isempty(params.weights);
+
+            if hasMassWeights
+                obj.rhoWeights = params.massWeights(:);
+                obj.weights = obj.rhoWeights;
+                obj.density = ones(obj.nGauss, 1);
+            elseif hasDensityWeights
+                obj.weights = params.weights(:);
+                density = params.density;
+
+                if ~(isnumeric(density) && isreal(density))
+                    error('params.density must be numeric and real.');
+                end
+
+                if isscalar(density)
+                    obj.density = density;
+                    densityVector = density * ones(obj.nGauss, 1);
+                else
+                    obj.density = density(:);
+                    densityVector = obj.density;
+                end
+
+                if numel(densityVector) ~= obj.nGauss
+                    error(['params.density must be scalar or contain ', ...
+                           'nGauss entries.']);
+                end
+
+                obj.rhoWeights = densityVector .* obj.weights;
+            else
+                error(['Provide either params.massWeights or both ', ...
+                       'params.density and params.weights.']);
+            end
+
+            if numel(obj.weights) ~= obj.nGauss
+                error('params.weights must contain nGauss entries.');
+            end
+
+            if numel(obj.rhoWeights) ~= obj.nGauss
+                error('params.massWeights must contain nGauss entries.');
+            end
+
+            if any(~isfinite(obj.weights)) || any(obj.weights <= 0)
+                error('Integration weights must be positive and finite.');
+            end
+
+            if any(~isfinite(obj.rhoWeights)) || any(obj.rhoWeights <= 0)
+                error('Mass weights rho*dV must be positive and finite.');
+            end
+        end
+
+        function y = contract_shape_products(obj, C, x)
+
+            if ~isequal(size(C), [3, 3])
+                error('C must be a 3 x 3 matrix.');
+            end
+
+            x = x(:);
+
+            if numel(x) ~= obj.nEta + 1
+                error('x must have nEta + 1 entries.');
+            end
+
+            y = zeros(obj.nEta, 1);
+
+            for k = 1:3
+                for l = 1:3
+                    y = y + C(k, l) * ...
+                        (obj.shapeProducts{k, l}(2:end, :) * x);
+                end
+            end
+        end
+
         function [theta, R, eta] = split_q(obj, q)
         %SPLIT_Q Split q = [theta; R; eta].
 
@@ -414,42 +490,41 @@ classdef FlexBody < handle
                 end
             end
 
-            % Eq. (5.60)
             S_t = obj.S_t0 + obj.S_bar * eta;
 
-            I_theta_theta = zeros(3);
-            I_theta_f = zeros(3, obj.nEta);
-            I_theta_theta_dot = zeros(3);
+            qAug = [1; eta];
+            qAugDot = [0; etaDot];
 
-            for g = 1:obj.nGauss
-                wg = obj.weights(g);
+            J11 = obj.shapeProducts{1, 1};
+            J12 = obj.shapeProducts{1, 2};
+            J13 = obj.shapeProducts{1, 3};
+            J21 = obj.shapeProducts{2, 1};
+            J22 = obj.shapeProducts{2, 2};
+            J23 = obj.shapeProducts{2, 3};
+            J31 = obj.shapeProducts{3, 1};
+            J32 = obj.shapeProducts{3, 2};
+            J33 = obj.shapeProducts{3, 3};
 
-                Sg = obj.S(:, :, g);
-                ug = obj.u0(:, g) + Sg * eta;
-                ug_dot = Sg * etaDot;
+            qf = @(A) qAug.' * A * qAug;
+            qfdot = @(A) qAugDot.' * A * qAug ...
+                + qAug.' * A * qAugDot;
 
-                ug_tilde = get_skew_sym_matrix(ug);
-                ug_dot_tilde = get_skew_sym_matrix(ug_dot);
+            I_theta_theta = [ ...
+                qf(J22 + J33), -qf(J12),       -qf(J13);
+               -qf(J21),        qf(J33 + J11), -qf(J23);
+               -qf(J31),       -qf(J32),        qf(J11 + J22)];
 
-                % Eq. (5.68)
-                I_theta_theta = I_theta_theta ...
-                    + obj.density * wg * ...
-                    (ug_tilde.' * ug_tilde);
+            I_theta_theta_dot = [ ...
+                qfdot(J22 + J33), -qfdot(J12),       -qfdot(J13);
+               -qfdot(J21),        qfdot(J33 + J11), -qfdot(J23);
+               -qfdot(J31),       -qfdot(J32),        qfdot(J11 + J22)];
 
-                I_theta_theta_dot = I_theta_theta_dot ...
-                    + obj.density * wg * ...
-                    (ug_dot_tilde.' * ug_tilde ...
-                     + ug_tilde.' * ug_dot_tilde);
+            I_theta_f = [ ...
+               -qAug.' * J32(:, 2:end) + qAug.' * J23(:, 2:end);
+                qAug.' * J31(:, 2:end) - qAug.' * J13(:, 2:end);
+               -qAug.' * J21(:, 2:end) + qAug.' * J12(:, 2:end)];
 
-                % Eq. (5.73)
-                I_theta_f = I_theta_f ...
-                    + obj.density * wg * ...
-                    (ug_tilde * Sg);
-            end
-
-            I_theta_theta = 0.5 * ...
-                (I_theta_theta + I_theta_theta.');
-
+            I_theta_theta = 0.5 * (I_theta_theta + I_theta_theta.');
             I_theta_theta_dot = 0.5 * ...
                 (I_theta_theta_dot + I_theta_theta_dot.');
         end
