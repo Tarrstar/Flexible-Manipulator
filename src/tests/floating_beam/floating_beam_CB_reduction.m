@@ -156,8 +156,8 @@ if ~isempty(exudyn_data)
 end
 
 grid on;
-title('Base');
-xlabel('Time / s');
+% title('Base');
+xlabel('Time (s)');
 ylabel('Base position');
 legend(baseLegend{:}, 'Location', 'best');
 
@@ -176,8 +176,8 @@ if ~isempty(exudyn_data)
 end
 
 grid on;
-title('Tip');
-xlabel('Time / s');
+% title('Tip');
+xlabel('Time (s)');
 ylabel('Tip position');
 legend(tipLegend{:}, 'Location', 'best');
 
