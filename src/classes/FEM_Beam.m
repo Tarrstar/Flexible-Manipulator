@@ -209,15 +209,15 @@ classdef FEM_Beam
             L = obj.length;
             W = obj.width;
             T = obj.thickness;
-
-            xNodes = L / 2 * (xi_x + 1);
             yNodes = W / 2 * xi_y;
             zNodes = T / 2 * xi_z;
 
-            jac = L / 2 * W / 2 * T / 2;
+            nElements = obj.elements_num;
+            elementLength = L / nElements;
+            jac = elementLength / 2 * W / 2 * T / 2;
 
             nFlexibleDofs = size(shapeMatrix, 2);
-            nGauss = nx * ny * nz;
+            nGauss = nElements * nx * ny * nz;
 
             u0 = zeros(3, nGauss);
             S = zeros(3, nFlexibleDofs, nGauss);
@@ -225,20 +225,26 @@ classdef FEM_Beam
 
             g = 0;
 
-            for ix = 1:nx
-                x = xNodes(ix);
+            for elementId = 1:nElements
+                xLeft = (elementId - 1) * elementLength;
 
-                for iy = 1:ny
-                    y = yNodes(iy);
+                for ix = 1:nx
+                    x = xLeft + elementLength / 2 * (xi_x(ix) + 1);
 
-                    for iz = 1:nz
-                        z = zNodes(iz);
+                    for iy = 1:ny
+                        y = yNodes(iy);
 
-                        g = g + 1;
+                        for iz = 1:nz
+                            z = zNodes(iz);
 
-                        u0(:, g) = [x; y; z];
-                        S(:, :, g) = obj.shape_func(x, y, z) * shapeMatrix;
-                        weights(g) = wi_x(ix) * wi_y(iy) * wi_z(iz) * jac;
+                            g = g + 1;
+
+                            u0(:, g) = [x; y; z];
+                            S(:, :, g) = ...
+                                obj.shape_func(x, y, z) * shapeMatrix;
+                            weights(g) = wi_x(ix) * wi_y(iy) * ...
+                                wi_z(iz) * jac;
+                        end
                     end
                 end
             end

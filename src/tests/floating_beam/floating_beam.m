@@ -36,8 +36,6 @@ beam.fixed_root = true;
 
 femBeam = FEM_Beam(beam);
 
-%% ================== 2. Direct FE coordinates ==================
-
 [~, K_beam] = femBeam.get_matrices_3d();
 
 [feShapeMatrix, stiffnessDofs] = femBeam.build_direct_fe_shape_matrix();
@@ -62,8 +60,6 @@ nz = 3;
 
 % No structural damping, same as Exudyn example.
 Dff = zeros(nFlexibleDofs);
-
-%% ================== 3. Create FlexBody ==================
 
 params.density = rho;
 params.u0      = u0;

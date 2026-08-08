@@ -102,19 +102,3 @@ function [R, T, delta] = get_deformation_transform(Phi, eta, method)
          0, 0, 0, 1];
 
 end
-
-
-function S = get_skew_sym_matrix(v)
-%GET_SKEW_SYM_MATRIX 返回三维向量对应的反对称矩阵
-
-    if ~isnumeric(v) || numel(v) ~= 3
-        error('输入 v 必须包含三个数值元素。');
-    end
-
-    v = v(:);
-
-    S = [ 0,    -v(3),  v(2);
-          v(3),  0,    -v(1);
-         -v(2),  v(1),  0    ];
-
-end

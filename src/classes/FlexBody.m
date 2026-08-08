@@ -68,7 +68,12 @@ classdef FlexBody < handle
                     size(obj.S, 2), 1);
             end
 
-            if ndims(obj.S) ~= 3 || size(obj.S, 1) ~= 3
+            % MATLAB drops trailing singleton dimensions, in particular
+            % for a rigid FlexBody with size 3-by-0-by-1.  The 2-D empty
+            % representation is nevertheless a valid one-integration-
+            % point shape matrix with nEta = 0.
+            if (ndims(obj.S) ~= 2 && ndims(obj.S) ~= 3) || ...
+                    size(obj.S, 1) ~= 3
                 error('params.S must have size 3 x nEta x nGauss.');
             end
 
