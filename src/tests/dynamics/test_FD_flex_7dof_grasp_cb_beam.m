@@ -8,7 +8,8 @@ projectDir = fileparts(srcDir);
 dataDir = fullfile(projectDir, 'data', 'arm_grasp_cb_beam');
 if ~exist(dataDir, 'dir'), mkdir(dataDir); end
 addpath(fullfile(srcDir, 'classes'), fullfile(srcDir, 'dynamics'), ...
-        fullfile(srcDir, 'utils'), fullfile(testDir, 'support'));
+        fullfile(srcDir, 'utils'), fullfile(srcDir, 'integrators'), ...
+        fullfile(testDir, 'support'));
 
 %% CB-reduced flexible rod
 beam.length = 1.0; 
@@ -73,14 +74,26 @@ if isempty(flexLink)
     error('The test model must contain one flexible link.');
 end
 
-% State vector: [q; qd; eta; eta_d].  ode45 uses adaptive time steps.
+% State vector: [q; eta; qDot; etaDot].
 x0 = zeros(2*NB + 2*nEta, 1);
-odeOptions = odeset('RelTol', 1e-6, 'AbsTol', 1e-8);
-[tVec, xHist] = ode45(@(t, x) grasp_cb_rhs(t, x, model, NB, nEta, flexLink), ...
-                      [0, T], x0, odeOptions);
+tau =@(t) [0.35*sin(2*pi*0.8*t); 0.25*cos(2*pi*0.6*t); ...
+       0.20*sin(2*pi*0.9*t); 0.16*cos(2*pi*0.7*t); ...
+       0.12*sin(2*pi*0.5*t); 0.10*cos(2*pi*0.8*t); ...
+       0.08*sin(2*pi*0.4*t); 0];
+tic;
+integratorOptions.RelTol = 1e-6;
+integratorOptions.AbsTol = 1e-8;
+integratorOptions.MaxStep = 1e-3;
+integratorOptions.SpectralRadius = 0.9;
+integratorOptions.PositionSize = NB + nEta;
+[tVec, xHist, integratorInfo] = generalized_alpha_integrator( ...
+    @(t, x) fixed_base_rhs( ...
+        t, x, model, NB, nEta, flexLink, tau), ...
+    [0, T], x0, integratorOptions);
+toc;
 
 qHist = xHist(:, 1:NB);
-etaHist = xHist(:, 2*NB + (1:nEta));
+etaHist = xHist(:, NB + (1:nEta));
 tipY = zeros(numel(tVec), 1);
 graspY = zeros(numel(tVec), 1);
 for k = 1:numel(tVec)
@@ -126,69 +139,75 @@ else
 end
 
 %% Compare with the Exudyn equal-mass, equal-inertia rigid beam
+
 exudynRigidCsv = fullfile(dataDir, 'exudyn_rigid_beam_tip_y.csv');
-exuRigidY = [];
+exuRigidY      = [];
 exuRigidGraspY = [];
+
 if exist(exudynRigidCsv, 'file')
     exuRigid = readmatrix(exudynRigidCsv);
     exuRigid = exuRigid(all(isfinite(exuRigid), 2), :);
+    
     if size(exuRigid, 2) < 2
         error('Exudyn rigid-beam CSV needs time and tip-y columns.');
     end
+    
     [~, uniqueIdx] = unique(exuRigid(:, 1), 'stable');
     exuRigid = exuRigid(uniqueIdx, :);
+    
     exuRigidY = interp1(exuRigid(:, 1), exuRigid(:, 2), ...
         tVec(:), 'linear', 'extrap');
-    rigidTipErr = tipY - exuRigidY;
-    fprintf('CB-FlexBody vs Exudyn equivalent rigid beam comparison:\n');
-    fprintf('  tip RMS difference = %.6e m\n', ...
-        sqrt(mean(rigidTipErr.^2)));
-    fprintf('  tip max difference = %.6e m\n', max(abs(rigidTipErr)));
+    
+    % rigidTipErr = tipY - exuRigidY;
+    % fprintf('CB-FlexBody vs Exudyn equivalent rigid beam comparison:\n');
+    % fprintf('  tip RMS difference = %.6e m\n', sqrt(mean(rigidTipErr.^2)));
+    % fprintf('  tip max difference = %.6e m\n', max(abs(rigidTipErr)));
+    
     if size(exuRigid, 2) >= 3
         exuRigidGraspY = interp1(exuRigid(:, 1), exuRigid(:, 3), ...
             tVec(:), 'linear', 'extrap');
-        rigidGraspErr = graspY - exuRigidGraspY;
-        fprintf('  grasp RMS difference = %.6e m\n', ...
-            sqrt(mean(rigidGraspErr.^2)));
-        fprintf('  grasp max difference = %.6e m\n', ...
-            max(abs(rigidGraspErr)));
+        % rigidGraspErr = graspY - exuRigidGraspY;
+        % fprintf('  grasp RMS difference = %.6e m\n', sqrt(mean(rigidGraspErr.^2)));
+        % fprintf('  grasp max difference = %.6e m\n', max(abs(rigidGraspErr)));
     end
 else
-    warning(['Run refs/exudyn_7dof_grasp_rigid_beam.py first: %s'], ...
-        exudynRigidCsv);
+    warning('Run refs/exudyn_7dof_grasp_rigid_beam.py first: %s', exudynRigidCsv);
 end
 
-figure('Color', 'w', 'Name', '7DOF grasped beam comparison');
-subplot(2, 1, 1);
-plot(tVec, graspY, 'LineWidth', 1.4); hold on;
-graspLegend = {'MATLAB CB-FlexBody'};
-if ~isempty(exuGraspY)
-    plot(tVec, exuGraspY, '--', 'LineWidth', 1.2);
-    graspLegend{end + 1} = 'Exudyn 3D beam';
-end
-if ~isempty(exuRigidGraspY)
-    plot(tVec, exuRigidGraspY, ':', 'LineWidth', 1.5);
-    graspLegend{end + 1} = 'Exudyn equivalent rigid beam';
-end
-grid on; ylabel('Grasp point y (m)');
-legend(graspLegend, 'Location', 'best');
+fig = figure('Color', 'w', 'Position', [100, 200, 800, 500]);
+ax  = axes(fig);
 
-subplot(2, 1, 2);
-plot(tVec, tipY, 'LineWidth', 1.4); hold on;
+% 绘制曲线 (区别线型与线宽)
+plot(tVec, tipY, 'LineStyle', '-', 'Color', [0.00, 0.45, 0.74], 'LineWidth', 1.6); hold on;
 tipLegend = {'MATLAB CB-FlexBody'};
+
 if ~isempty(exuY)
-    plot(tVec, exuY, '--', 'LineWidth', 1.2);
+    plot(tVec, exuY, 'LineStyle', '--', 'Color', [0.85, 0.33, 0.10], 'LineWidth', 1.5);
     tipLegend{end + 1} = 'Exudyn 3D beam';
 end
-if ~isempty(exuRigidY)
-    plot(tVec, exuRigidY, ':', 'LineWidth', 1.5);
-    tipLegend{end + 1} = 'Exudyn equivalent rigid beam';
-end
-grid on; xlabel('Time (s)'); ylabel('Rod endpoint y (m)');
-legend(tipLegend, 'Location', 'best');
-saveas(gcf, fullfile(dataDir, 'cb_beam_tip_y_vs_exudyn.png'));
-fprintf('MATLAB data saved to %s\n', matlabCsv);
 
+if ~isempty(exuRigidY)
+    plot(tVec, exuRigidY, 'LineStyle', ':', 'Color', [0.46, 0.67, 0.18], 'LineWidth', 1.8);
+    tipLegend{end + 1} = 'Rigid';
+end
+hold off;
+
+% 细节美化与坐标轴配置
+grid on; box on;
+xlim([0, 1]); % 保持 X 轴范围 0-5 s
+
+set(ax, 'FontSize', 12, 'LineWidth', 1.0); % 轴刻度数字设为 12pt
+
+xlabel('Time (s)', 'FontSize', 14);
+ylabel('Rod endpoint y (m)', 'FontSize', 14');
+legend(tipLegend, 'Location', 'best', 'FontSize', 12);
+
+figPath = fullfile(dataDir, 'cb_beam_tip_y_vs_exudyn.png');
+exportgraphics(fig, figPath, 'Resolution', 300);
+
+fprintf('MATLAB data saved to %s\n', matlabCsv);
+fprintf('Comparison figure saved to %s\n', figPath);
+%%
 function [y, graspY] = grasped_tip_y(model, q, eta, beamLength, tipShape)
 X = eye(6);
 for i = 1:model.NB
@@ -200,19 +219,4 @@ tip = Xpt(inv(X), tipLocal);
 y = tip(2);
 grasp = Xpt(inv(X), zeros(3, 1));
 graspY = grasp(2);
-end
-
-function dx = grasp_cb_rhs(t, x, model, NB, nEta, flexLink)
-q = x(1:NB);
-qd = x(NB + (1:NB));
-eta = x(2*NB + (1:nEta));
-eta_d = x(2*NB + nEta + (1:nEta));
-
-tau = [0.35*sin(2*pi*0.8*t); 0.25*cos(2*pi*0.6*t); ...
-       0.20*sin(2*pi*0.9*t); 0.16*cos(2*pi*0.7*t); ...
-       0.12*sin(2*pi*0.5*t); 0.10*cos(2*pi*0.8*t); ...
-       0.08*sin(2*pi*0.4*t); 0];
-[qdd, eta_dd] = FD_flex(model, q, qd, tau, eta, eta_d);
-
-dx = [qd; qdd; eta_d; eta_dd{flexLink}(:)];
 end

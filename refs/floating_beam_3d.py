@@ -10,11 +10,11 @@ mbs = SC.AddSystem()
 
 # ================== 1. Beam parameters ==================
 
-Lbeam = 2.0
-W_beam = 0.1
-T_beam = 0.05
-rho = 2700.0
-E = 7.0e7
+Lbeam = 1.0
+W_beam = 0.032
+T_beam = 0.0015
+rho = 7543
+E = 1.983e11
 
 A = W_beam * T_beam
 Izz = W_beam * T_beam**3 / 12.0

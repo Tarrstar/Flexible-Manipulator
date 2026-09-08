@@ -99,7 +99,7 @@ x0 = [params.q;
 %
 % LoadTorqueVector(..., loadVector=[0, 0, 1.0])
 %
-Mz = 1.0;
+F = [0;0;1.0;0;0;0.0];
 
 %% ================== 5. Time integration ==================
 
@@ -108,7 +108,7 @@ odeOptions = odeset( ...
     'AbsTol', 1e-8, ...
     'MaxStep', timeStep);
 
-rhs = @(t, x) rhs_flexbody(t, x, body, Mz);
+rhs = @(t, x) rhs_flexbody(t, x, body, F);
 [~, xHist] = ode45(rhs, tVec, x0, odeOptions);
 
 log_data = zeros(numel(tVec), 6);

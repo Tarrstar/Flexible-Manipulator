@@ -8,18 +8,6 @@ function [Irr, Ire, Mee, C, c] = floating_frame_terms(body, v, eta, eta_d)
     eta = eta(:);
     eta_d = eta_d(:);
 
-    if numel(qBody) ~= 7 + body.nEta
-        error('FlexBody state has an inconsistent dimension.');
-    end
-
-    if numel(v) ~= 6
-        error('v must contain [omega; linearVelocity].');
-    end
-
-    if numel(eta) ~= body.nEta || numel(eta_d) ~= body.nEta
-        error('eta and eta_d must contain body.nEta entries.');
-    end
-
     qBody(8:end) = eta;
 
     theta = qBody(1:4);
@@ -45,8 +33,11 @@ function [Irr, Ire, Mee, C, c] = floating_frame_terms(body, v, eta, eta_d)
     % Spatial acceleration already includes the translational convective
     % term. The remaining coordinate-map bias is quaternion-only.
     [~, GbarDot] = get_quaternion_G_dot_matrices(thetaDot);
-    qddBias = [0.25 * GbarDot.' * omega;
-                zeros(3 + body.nEta, 1)];
+    qddBias = [
+    0.25 * GbarDot.' * omega;
+    A * cross(omega, linearVelocity);
+    zeros(body.nEta, 1)
+];
     bias = -Qv + M * qddBias;
 
     Mrr = M(1:7, 1:7);

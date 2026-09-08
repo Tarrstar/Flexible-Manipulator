@@ -1,13 +1,8 @@
 function [qdd, eta_dd] = FD_flex(model, q, qd, tau, eta, eta_d, f_ext)
 
 NB = model.NB;
-if ~isfield(model, 'link_type')
-    error('model.link_type must specify ''rigid'' or ''flexible'' for every link.');
-end
+
 q = q(:); qd = qd(:); tau = tau(:);
-if numel(q) ~= NB || numel(qd) ~= NB || numel(tau) ~= NB
-    error('q, qd and tau must contain one entry per joint.');
-end
 
 fixedJoint = false(NB, 1);
 if isfield(model, 'fixed_joints') && ~isempty(model.fixed_joints)
@@ -16,18 +11,12 @@ if isfield(model, 'fixed_joints') && ~isempty(model.fixed_joints)
         fixedJoint = fixedSpec(:);
     else
         fixedIds = fixedSpec(:);
-        if any(fixedIds < 1 | fixedIds > NB | fixedIds ~= round(fixedIds))
-            error('model.fixed_joints must contain valid joint indices.');
-        end
         fixedJoint(fixedIds) = true;
     end
 end
 if nargin < 7 || isempty(f_ext)
     f_ext = cell(NB, 1);
 elseif ~iscell(f_ext)
-    if NB ~= 1
-        error('For multiple links, f_ext must be a cell array with one force per link.');
-    end
     f_ext = {f_ext};
 elseif numel(f_ext) < NB
     f_ext(end + 1:NB) = {[]};
@@ -40,24 +29,11 @@ else
 end
 if numel(a_grav) == 3
     a_grav = [0; 0; 0; a_grav];
-elseif numel(a_grav) ~= 6
-    error('model.gravity must contain either 3 linear or 6 spatial components.');
 end
 
-% Forward pass (Pass 1: Kinematics and local dynamics terms)
-Xup = cell(NB, 1); S = cell(NB, 1); B = cell(NB, 1);
-etaState = cell(NB, 1); etaDotState = cell(NB, 1);
-edgeB = cell(NB, 1); edgeR = cell(NB, 1);
-v = cell(NB, 1); n = cell(NB, 1); gamma = cell(NB, 1);
-Irr = cell(NB, 1); Ire = cell(NB, 1); Mee = cell(NB, 1);
-C = cell(NB, 1); c = cell(NB, 1);
-Irrp = cell(NB, 1); Irep = cell(NB, 1); Ierp = cell(NB, 1); Meep = cell(NB, 1);
-Cp = cell(NB, 1); cp = cell(NB, 1);
-Kp = cell(NB, 1); bp = cell(NB, 1);
-Wg = cell(NB, 1); H = cell(NB, 1); H_rigid = cell(NB, 1);
+% Forward pass (Pass 1: Kinematics and local dynamics terms);
 
 for i = 1:NB
-    % 1. 获取当前连杆 i 本身的模态状态、振型矩阵 B{i} 及变形位姿 Xdef{i}
     if is_flexible_link(model, i)
         [B{i}, eta_i, eta_d_i] = local_modal_state(model, i, eta, eta_d);
     else
@@ -67,7 +43,6 @@ for i = 1:NB
     etaState{i} = eta_i;
     etaDotState{i} = eta_d_i;
 
-    % 2. 铰接运动子空间及包含模态耦合的相对速度 vJ
     if fixedJoint(i)
         [XJ, ~] = jcalc(model.jtype{i}, 0);
         S{i} = zeros(6, 1);
@@ -75,7 +50,6 @@ for i = 1:NB
         [XJ, S{i}] = jcalc(model.jtype{i}, q(i));
     end
 
-    % 3. 父连杆 (Parent) 几何变形传递与 Xup 计算
     p = model.parent(i);
     if p ~= 0
         if is_flexible_link(model, p)
@@ -87,7 +61,6 @@ for i = 1:NB
             XdefParent = eye(6);
         end
         Xup{i} = XJ * XdefParent * model.Xtree{i};
-        % 跨连杆变换矩阵：铰接变换 * 父连杆末端变形 * 树拓扑偏移
         vParent = Xup{i} * v{p};
         edgeR{i} = spatial_rotation(Xup{i});
         if is_flexible_link(model, p)
@@ -96,7 +69,6 @@ for i = 1:NB
             vFlexParent = zeros(6, 1);
         end
     else
-        % 基座连杆 (Base)
         Xup{i} = XJ * model.Xtree{i};
         vParent = zeros(6, 1);
         edgeR{i} = spatial_rotation(Xup{i});
@@ -104,14 +76,8 @@ for i = 1:NB
         vFlexParent = zeros(6, 1);
     end
 
-    % 4. 当前连杆 i 的总空间速度与偏置加速度 gamma
     vJ = S{i} * qd(i) + vFlexParent;
     v{i} = vParent + vJ;
-    if ~isequal(size(v{i}), [6, 1])
-        error(['Link %d velocity must be 6-by-1; vParent is %d-by-%d, ', ...
-            'joint/endpoint velocity is %d-by-%d.'], i, ...
-            size(vParent, 1), size(vParent, 2), size(vJ, 1), size(vJ, 2));
-    end
     gamma{i} = crm(v{i}) * vJ;
 
     if is_flexible_link(model, i)
@@ -146,9 +112,6 @@ end
 % Backward pass (Pass 2: Articulated body inertia and bias forces)
 for k = NB:-1:1
     if is_flexible_link(model, k)
-        if isempty(Meep{k})
-            error('Flexible link %d has no composite modal mass matrix.', k);
-        end
         Kp{k} = Irrp{k} - Irep{k} * (Meep{k} \ Ierp{k});
         bp{k} = Cp{k} - Irep{k} * (Meep{k} \ cp{k});
     else
@@ -203,9 +166,6 @@ for j = 1:NB
     if parent == 0
         aParent_j = Xup{j} * baseAccel;
     else
-        % 父连杆的总空间加速度 = 父连杆参考系加速度 + 父连杆模态加速度
-        
-        % 利用 Xup{j} 将父节点总加速度映射到当前连杆 j 坐标系
         aParent_j = Xup{j} * aLink{parent};
         if is_flexible_link(model, parent)
             aFlexParent = edgeR{j} * edgeB{j} * eta_dd{parent};
@@ -215,7 +175,6 @@ for j = 1:NB
         aParent_j = Xup{j} * aLink{parent} + aFlexParent;
     end
     
-    % 求解关节加速度 qdd
     if fixedJoint(j)
         qdd(j) = 0;
     else
@@ -226,7 +185,6 @@ for j = 1:NB
     n{j} = S{j} * qdd(j) + gamma{j};
     aLink{j} = aParent_j + n{j};
     
-    % 求解模态加速度 eta_dd
     if is_flexible_link(model, j)
         aRigid = aLink{j};
         eta_dd{j} = -(Meep{j} \ (Ierp{j} * aRigid + cp{j}));
@@ -235,28 +193,4 @@ for j = 1:NB
     end
 end
 
-end
-
-function R6 = spatial_rotation(X)
-R = X(1:3, 1:3);
-R6 = blkdiag(R, R);
-end
-
-function Phi = endpoint_shape(model, child, parent, defaultPhi, nEta)
-% Use an edge-specific endpoint map for branched flexible structures.
-% Existing serial models continue to use model.Phi{parent}.
-Phi = defaultPhi;
-if isfield(model, 'Phi_to_child') && numel(model.Phi_to_child) >= child && ...
-        ~isempty(model.Phi_to_child{child})
-    Phi = model.Phi_to_child{child};
-end
-
-if ~is_flexible_link(model, parent)
-    Phi = zeros(6, 0);
-    return;
-end
-if size(Phi, 1) ~= 6 || size(Phi, 2) ~= nEta
-    error(['Endpoint shape map for parent link %d and child link %d must ', ...
-        'have size 6-by-%d.'], parent, child, nEta);
-end
 end

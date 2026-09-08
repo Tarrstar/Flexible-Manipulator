@@ -22,6 +22,13 @@ classdef FlexBody < handle
 
         K_ff
         D_ff
+
+        geometric_stiffening
+        geometric_C
+        geometric_D
+        geometric_rotation_axis
+        axial_base_acceleration
+        geometric_stiffness_data_available
     end
 
     methods
@@ -35,9 +42,6 @@ classdef FlexBody < handle
                 return;
             end
 
-            if ~isstruct(params)
-                error('Input params must be a struct.');
-            end
 
             requiredFields = {'u0', 'S'};
 
@@ -123,6 +127,66 @@ classdef FlexBody < handle
                 end
             else
                 obj.D_ff = zeros(obj.nEta);
+            end
+
+            % Optional first-order geometric-stiffening correction from
+            % Liu and Hong, JSV 278 (2004), Eqs. (47), (48), (53), (56):
+            %   DeltaK = omega^2*D - axialBaseAcceleration*C.
+            % It is disabled by default so existing models are unchanged.
+            obj.geometric_stiffening = false;
+            obj.geometric_C = zeros(obj.nEta);
+            obj.geometric_D = zeros(obj.nEta);
+            obj.geometric_rotation_axis = [0; 0; 1];
+            obj.axial_base_acceleration = 0;
+            obj.geometric_stiffness_data_available = false;
+
+            if isfield(params, 'geometric_stiffening') && ...
+                    ~isempty(params.geometric_stiffening)
+                obj.geometric_stiffening = ...
+                    obj.validate_logical_scalar( ...
+                    params.geometric_stiffening, ...
+                    'params.geometric_stiffening');
+            elseif isfield(params, 'geometricStiffening') && ...
+                    ~isempty(params.geometricStiffening)
+                obj.geometric_stiffening = ...
+                    obj.validate_logical_scalar( ...
+                    params.geometricStiffening, ...
+                    'params.geometricStiffening');
+            end
+
+            hasGeometricC = isfield(params, 'geometric_C') && ...
+                ~isempty(params.geometric_C);
+            hasGeometricD = isfield(params, 'geometric_D') && ...
+                ~isempty(params.geometric_D);
+            if hasGeometricC ~= hasGeometricD
+                error(['params.geometric_C and params.geometric_D must ', ...
+                    'be provided together.']);
+            end
+            if hasGeometricC
+                obj.geometric_C = obj.validate_geometric_matrix( ...
+                    params.geometric_C, 'params.geometric_C');
+                obj.geometric_D = obj.validate_geometric_matrix( ...
+                    params.geometric_D, 'params.geometric_D');
+                obj.geometric_stiffness_data_available = true;
+            elseif obj.geometric_stiffening
+                error(['Geometric stiffening is enabled, but ', ...
+                    'params.geometric_C and params.geometric_D are missing.']);
+            end
+
+            if isfield(params, 'geometric_rotation_axis') && ...
+                    ~isempty(params.geometric_rotation_axis)
+                axis = params.geometric_rotation_axis(:);
+                if numel(axis) ~= 3 || any(~isfinite(axis)) || norm(axis) == 0
+                    error(['params.geometric_rotation_axis must be a ', ...
+                        'finite nonzero 3-vector.']);
+                end
+                obj.geometric_rotation_axis = axis / norm(axis);
+            end
+
+            if isfield(params, 'axial_base_acceleration') && ...
+                    ~isempty(params.axial_base_acceleration)
+                obj.set_axial_base_acceleration( ...
+                    params.axial_base_acceleration);
             end
 
             obj.pre_calculate();
@@ -297,9 +361,13 @@ classdef FlexBody < handle
 
             etaDot = qdot(8:end);
 
+            % Kgeometric = obj.get_geometric_stiffness_matrix(q, qdot);
+
             Qe = [zeros(7, 1);
-                  obj.K_ff * eta + obj.D_ff * etaDot];
+                  (obj.K_ff) * eta ...
+                  + obj.D_ff * etaDot];
         end
+
 
         function Qv = get_quadratic_velocity_vec(obj, q, qdot)
 
@@ -373,6 +441,24 @@ classdef FlexBody < handle
     end
 
     methods (Access = private)
+        function value = validate_logical_scalar(~, value, name)
+            if ~(islogical(value) || isnumeric(value)) || ...
+                    ~isscalar(value) || ~isreal(value) || ...
+                    ~isfinite(value) || ~(value == 0 || value == 1)
+                error('%s must be a logical scalar.', name);
+            end
+            value = logical(value);
+        end
+
+        function matrix = validate_geometric_matrix(obj, matrix, name)
+            if ~isnumeric(matrix) || ~isreal(matrix) || ...
+                    ~isequal(size(matrix), [obj.nEta, obj.nEta]) || ...
+                    any(~isfinite(matrix(:)))
+                error('%s must be a finite real nEta-by-nEta matrix.', name);
+            end
+            matrix = 0.5 * (matrix + matrix.');
+        end
+
         function initialize_integration_weights(obj, params)
 
             hasMassWeights = isfield(params, 'massWeights') && ...
