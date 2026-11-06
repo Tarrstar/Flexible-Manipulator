@@ -12,18 +12,6 @@ classdef FEM_Beam_CB_Reduction < FEM_Beam
         function obj = FEM_Beam_CB_Reduction(params)
             obj@FEM_Beam(params);
 
-            if isfield(params, 'reductionMatrix')
-                obj.reductionMatrix = params.reductionMatrix;
-            end
-
-            if isfield(params, 'fullShapeMatrix')
-                obj.fullShapeMatrix = params.fullShapeMatrix;
-            end
-
-            if isfield(params, 'fullStiffnessDofs')
-                obj.fullStiffnessDofs = params.fullStiffnessDofs;
-            end
-
             if isfield(params, 'boundaryNodeIds')
                 obj.boundaryNodeIds = params.boundaryNodeIds(:).';
             end
@@ -36,25 +24,13 @@ classdef FEM_Beam_CB_Reduction < FEM_Beam
         function [reductionMatrix, info] = build_cb_reduction( ...
                 obj, nInteriorModes, boundaryNodeIds)
 
-            if nargin < 2 || isempty(nInteriorModes)
-                nInteriorModes = obj.nInteriorModes;
-            end
-
-            if nargin < 3 || isempty(boundaryNodeIds)
-                boundaryNodeIds = obj.boundaryNodeIds;
-            end
-
-            if isempty(boundaryNodeIds)
-                boundaryNodeIds = [1, obj.elements_num + 1];
-            end
+            boundaryNodeIds = obj.boundaryNodeIds;
 
             [MFull, KFull] = obj.get_matrices_3d();
             [~, stiffnessDofs] = obj.build_direct_fe_shape_matrix();
 
             MFull = full(MFull(stiffnessDofs, stiffnessDofs));
             KFull = full(KFull(stiffnessDofs, stiffnessDofs));
-            MFull = 0.5 * (MFull + MFull.');
-            KFull = 0.5 * (KFull + KFull.');
 
             freeDofs = obj.get_free_dofs();
             boundaryGlobalDofs = [];
@@ -85,7 +61,16 @@ classdef FEM_Beam_CB_Reduction < FEM_Beam
             ni = numel(interiorCoordIds);
             nModes = min(max(0, nInteriorModes), ni);
 
+            % Craig-Bampton reduction:
+            % u = T_CB * [u_b; eta]
+            %
+            %        [ I       0   ]
+            % T_CB = [             ]
+            %        [ Psi_c   Phi ]
+            %
+
             reductionMatrix = zeros(nFull, nb + nModes);
+            % I
             reductionMatrix(boundaryCoordIds, 1:nb) = eye(nb);
 
             modalFrequencies = zeros(nModes, 1);
@@ -95,6 +80,7 @@ classdef FEM_Beam_CB_Reduction < FEM_Beam
                 Kib = KFull(interiorCoordIds, boundaryCoordIds);
                 Mii = MFull(interiorCoordIds, interiorCoordIds);
 
+                %  Psi_c
                 constraintModes = -Kii \ Kib;
                 reductionMatrix(interiorCoordIds, 1:nb) = constraintModes;
 
@@ -174,17 +160,18 @@ classdef FEM_Beam_CB_Reduction < FEM_Beam
 
             [~, KFull] = obj.get_matrices_3d();
             KFull = full(KFull(stiffnessDofs, stiffnessDofs));
-            KFull = 0.5 * (KFull + KFull.');
 
             if size(reductionMatrix, 1) ~= size(fullShapeMatrix, 2)
                 error(['reductionMatrix row count must match the ', ...
                        'full FE coordinate count.']);
             end
-
+            
+            % Projection of FE displacement field and stiffness:
+            % u(r) = S(r) * u_FE = S(r) * T_CB * q_red
+            % S_red(r) = S(r) * T_CB
+            % K_red = T_CB' * K_full * T_CB
             shapeMatrix = fullShapeMatrix * reductionMatrix;
             stiffnessMatrix = reductionMatrix.' * KFull * reductionMatrix;
-            stiffnessMatrix = 0.5 * ...
-                (stiffnessMatrix + stiffnessMatrix.');
         end
 
         function [u0, S, weights, shapeMatrix, stiffnessMatrix, ...

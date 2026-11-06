@@ -11,8 +11,15 @@ function [tout, Xout, info] = generalized_alpha_integrator(varargin)
 %       SpectralRadius     high-frequency spectral radius, default 0.9
 %       MaxIterations      nonlinear iterations per step, default 30
 %       MaxSubdivisions    failed-step halvings, default 8
-%       MinRelaxation      lower Aitken relaxation bound, default 0.05
+%       CasadiRHS          optional CasADi-compatible RHS for graph creation
+%                          (defaults to RHS; no finite-difference fallback)
 %       QuaternionIndices  four quaternion indices in the configuration
+%
+%   Each implicit step uses Newton iterations and a CasADi AD Jacobian.
+%   The graph is built once, outside the time loop. Model constants captured
+%   by RHS must remain constant during this integration call.
+%   Physical acceleration edd and filtered algorithmic acceleration a are
+%   tracked separately. Loads/dynamics are evaluated at the endpoint t+h.
 %
 %   When QuaternionIndices is provided, angular velocity must occupy the
 %   first three velocity entries and body-frame linear velocity the next
@@ -56,11 +63,26 @@ if isempty(x0) || any(~isfinite(x0))
 end
 
 opts = local_options(options, tspan, numel(x0));
+parameters = local_parameters(opts);
 [outputTimes, nominalStep] = local_output_times(tspan(:), opts.maxStep);
 opts.nominalStep = nominalStep;
 
+initializationStart = tic;
 derivative0 = local_rhs(rhs, outputTimes(1), x0, varargin{:});
 acceleration = derivative0(opts.positionSize + 1:end);
+setupStart = tic;
+newtonSystem = local_build_newton_system(rhs, varargin, parameters, opts, numel(x0));
+jacobianSetupSeconds = toc(setupStart);
+% Check the symbolic graph against the ordinary numeric RHS at x0.
+[initialResidual, ~] = newtonSystem(zeros(size(acceleration)), outputTimes(1), ...
+    nominalStep, x0(1:opts.positionSize), zeros(size(acceleration)), ...
+    x0(opts.positionSize + 1:end));
+initialResidual = full(initialResidual);
+if any(~isfinite(initialResidual)) || ...
+        norm(initialResidual + acceleration, inf) > 1e-10 * max(1, norm(acceleration, inf))
+    error('generalized_alpha_integrator:CasadiRHSMismatch', ...
+        'The CasADi RHS does not agree with the numeric RHS at x0.');
+end
 
 nOutput = numel(outputTimes);
 tout = outputTimes;
@@ -70,13 +92,9 @@ Xout(1, :) = x0.';
 state.configuration = x0(1:opts.positionSize);
 state.velocity = x0(opts.positionSize + 1:end);
 state.acceleration = acceleration;
+state.algorithmicAcceleration = acceleration;
 
 rhoInf = opts.spectralRadius;
-alphaM = (2 * rhoInf - 1) / (rhoInf + 1);
-alphaF = rhoInf / (rhoInf + 1);
-gamma = 0.5 - alphaM + alphaF;
-beta = 0.25 * (1 - alphaM + alphaF)^2;
-parameters = [alphaM, alphaF, gamma, beta];
 
 statistics.internalSteps = 0;
 statistics.subdividedSteps = 0;
@@ -87,22 +105,30 @@ statistics.relativeResidualHistory = cell(0, 1);
 statistics.stepStartTimes = zeros(0, 1);
 statistics.stepSizes = zeros(0, 1);
 
+initializationSeconds = toc(initializationStart) - jacobianSetupSeconds;
+integrationStart = tic;
 for outputIndex = 2:nOutput
     targetTime = outputTimes(outputIndex);
     t = outputTimes(outputIndex - 1);
     while t < targetTime - 10 * eps(max(1, abs(targetTime)))
         dt = min(opts.maxStep, targetTime - t);
         [state, stepStats] = local_advance( ...
-            rhs, varargin, t, dt, state, 0, parameters, opts);
+            newtonSystem, t, dt, state, 0, parameters, opts);
         t = t + dt;
         statistics = local_accumulate_statistics(statistics, stepStats);
     end
     Xout(outputIndex, :) = [state.configuration; state.velocity].';
 end
+integrationSeconds = toc(integrationStart);
 
 info = statistics;
 info.numberOfOutputSteps = nOutput - 1;
 info.spectralRadius = rhoInf;
+info.nonlinearSolver = 'Newton';
+info.jacobianMethod = 'CasADi automatic differentiation';
+info.jacobianSetupSeconds = jacobianSetupSeconds;
+info.initializationSeconds = initializationSeconds;
+info.integrationSeconds = integrationSeconds;
 if statistics.internalSteps > 0
     info.averageIterations = statistics.totalIterations / ...
         statistics.internalSteps;
@@ -112,10 +138,10 @@ end
 end
 
 function [stateOut, stats] = local_advance( ...
-        rhs, rhsArgs, t, dt, stateIn, depth, parameters, opts)
+        newtonSystem, t, dt, stateIn, depth, parameters, opts)
 
 [stateOut, converged, iterations, absoluteResiduals, relativeResiduals] = local_single_step( ...
-    rhs, rhsArgs, t, dt, stateIn, parameters, opts);
+    newtonSystem, t, dt, stateIn, parameters, opts);
 
 stats.internalSteps = 1;
 stats.subdividedSteps = 0;
@@ -138,9 +164,9 @@ end
 
 halfStep = 0.5 * dt;
 [midState, firstStats] = local_advance( ...
-    rhs, rhsArgs, t, halfStep, stateIn, depth + 1, parameters, opts);
+    newtonSystem, t, halfStep, stateIn, depth + 1, parameters, opts);
 [stateOut, secondStats] = local_advance( ...
-    rhs, rhsArgs, t + halfStep, halfStep, midState, depth + 1, ...
+    newtonSystem, t + halfStep, halfStep, midState, depth + 1, ...
     parameters, opts);
 
 stats.internalSteps = firstStats.internalSteps + secondStats.internalSteps;
@@ -160,64 +186,63 @@ stats.stepSizes = [firstStats.stepSizes; secondStats.stepSizes];
 end
 
 function [stateOut, converged, iteration, absoluteResiduals, relativeResiduals] = local_single_step( ...
-        rhs, rhsArgs, t, dt, state, parameters, opts)
+        newtonSystem, t, h, state, parameters, opts)
 
 alphaM = parameters(1);
 alphaF = parameters(2);
 gamma = parameters(3);
 beta = parameters(4);
 
-configurationN = state.configuration;
-velocityN = state.velocity;
-accelerationN = state.acceleration;
+gamma_prime = gamma / (h * beta);
+beta_prime = (1 - alphaM) / (h^2 * beta * (1 - alphaF));
 
-velocityPredictor = velocityN + dt * (1 - gamma) * accelerationN;
-incrementPredictor = dt * velocityN + ...
-    dt^2 * (0.5 - beta) * accelerationN;
-accelerationGuess = accelerationN;
-previousResidual = [];
-relaxation = 1;
+% Same filtered-acceleration predictor/corrector form as the supplied example.
+% edd is physical acceleration; a is the separate algorithmic acceleration.
+e_n = state.configuration;
+ed_n = state.velocity;
+edd_n = state.acceleration;
+a_n = state.algorithmicAcceleration;
+ed_pred = ed_n + h * (1 - gamma) * a_n;
+increment_pred = h * ed_n + h^2 * (0.5 - beta) * a_n;
+a = (alphaF * edd_n - alphaM * a_n) / (1 - alphaM);
+increment_base = increment_pred + h^2 * beta * a;
+ed_base = ed_pred + h * gamma * a;
+correction = zeros(size(ed_n));
+edd_new = zeros(size(edd_n));
+e = local_update_configuration(e_n, increment_base, opts);
+ed = ed_base;
 converged = false;
 absoluteResiduals = zeros(opts.maxIterations, 1);
 relativeResiduals = zeros(opts.maxIterations, 1);
 
 for iteration = 1:opts.maxIterations
-    incrementNext = incrementPredictor + beta * dt^2 * accelerationGuess;
-    velocityNext = velocityPredictor + gamma * dt * accelerationGuess;
-    configurationAlpha = local_update_configuration( ...
-        configurationN, (1 - alphaF) * incrementNext, opts);
-    velocityAlpha = alphaF * velocityN + (1 - alphaF) * velocityNext;
-    tAlpha = alphaF * t + (1 - alphaF) * (t + dt);
-
-    xAlpha = [configurationAlpha; velocityAlpha];
-    derivativeAlpha = local_rhs(rhs, tAlpha, xAlpha, rhsArgs{:});
-    dynamicAcceleration = derivativeAlpha(opts.positionSize + 1:end);
-    target = (dynamicAcceleration - alphaM * accelerationN) / ...
-        (1 - alphaM);
-    residual = target - accelerationGuess;
-
-    errorAbsolute = norm(residual, inf);
-    errorRelative = errorAbsolute / max(1, norm(target, inf));
+    % R = edd_new - FD(t+h,e,ed). The FD API has already inverted M.
+    % H = dR/dcorrection includes ALL configuration/velocity dependence,
+    % not just beta_prime*M + K + gamma_prime*D with frozen coefficients.
+    [Residual, H] = newtonSystem(correction, t + h, h, e_n, increment_base, ed_base);
+    Residual = full(Residual); H = full(H);
+    if any(~isfinite(Residual)) || any(~isfinite(H(:)))
+        absoluteResiduals(iteration) = Inf;
+        relativeResiduals(iteration) = Inf;
+        break;
+    end
+    dynamicAcceleration = edd_new - Residual;
+    errorAbsolute = norm(Residual, inf);
+    errorRelative = errorAbsolute / max([1, norm(dynamicAcceleration, inf), norm(edd_new, inf)]);
     absoluteResiduals(iteration) = errorAbsolute;
     relativeResiduals(iteration) = errorRelative;
     if errorAbsolute <= opts.absoluteTolerance || ...
             errorRelative <= opts.relativeTolerance
-        accelerationGuess = target;
         converged = true;
         break;
     end
 
-    if ~isempty(previousResidual)
-        residualChange = residual - previousResidual;
-        denominator = residualChange.' * residualChange;
-        if denominator > eps * max(1, residual.' * residual)
-            relaxation = -relaxation * ...
-                (previousResidual.' * residualChange) / denominator;
-            relaxation = min(1, max(opts.minRelaxation, relaxation));
-        end
-    end
-    accelerationGuess = accelerationGuess + relaxation * residual;
-    previousResidual = residual;
+    delta = -H \ Residual;
+    if any(~isfinite(delta)), break; end
+    correction = correction + delta;
+    e = local_update_configuration(e_n, increment_base + correction, opts);
+    ed = ed + gamma_prime * delta;
+    edd_new = edd_new + beta_prime * delta;
 end
 
 absoluteResiduals = absoluteResiduals(1:iteration);
@@ -228,11 +253,55 @@ if ~converged
     return;
 end
 
-incrementNext = incrementPredictor + beta * dt^2 * accelerationGuess;
-stateOut.configuration = local_update_configuration( ...
-    configurationN, incrementNext, opts);
-stateOut.velocity = velocityPredictor + gamma * dt * accelerationGuess;
-stateOut.acceleration = accelerationGuess;
+stateOut.configuration = e;
+stateOut.velocity = ed;
+stateOut.acceleration = edd_new;
+stateOut.algorithmicAcceleration = a + (1 - alphaF) * edd_new / (1 - alphaM);
+end
+
+function parameters = local_parameters(opts)
+rhoInf = opts.spectralRadius;
+alphaM = (2 * rhoInf - 1) / (rhoInf + 1);
+alphaF = rhoInf / (rhoInf + 1);
+gamma = 0.5 + alphaF - alphaM;
+beta = 0.25 * (0.5 + gamma)^2;
+parameters = [alphaM, alphaF, gamma, beta];
+end
+
+function system = local_build_newton_system(rhs, rhsArgs, parameters, opts, stateSize)
+if isempty(which('casadi.MX'))
+    error('generalized_alpha_integrator:CasadiUnavailable', ...
+        'CasADi is required for Newton AD. Add its MATLAB folder to the path.');
+end
+if ~isempty(opts.casadiRHS), rhs = opts.casadiRHS; end
+nVelocity = stateSize - opts.positionSize;
+try
+    z = casadi.MX.sym('correction', nVelocity);
+    time = casadi.MX.sym('time'); h = casadi.MX.sym('step');
+    e_n = casadi.MX.sym('configuration_n', opts.positionSize);
+    increment_base = casadi.MX.sym('increment_base', nVelocity);
+    ed_base = casadi.MX.sym('velocity_base', nVelocity);
+    gamma_prime = parameters(3) / (h * parameters(4));
+    beta_prime = (1 - parameters(1)) / (h^2 * parameters(4) * (1 - parameters(2)));
+    e = local_update_configuration(e_n, increment_base + z, opts);
+    ed = ed_base + gamma_prime * z;
+    derivative = rhs(time, [e; ed], rhsArgs{:});
+    derivative = derivative(:);
+    if numel(derivative) ~= stateSize
+        error('Symbolic RHS returned an incorrect dimension.');
+    end
+    Residual = beta_prime * z - derivative(opts.positionSize + 1:end);
+    H = jacobian(Residual, z); % CasADi MX method (also works with 3.5.x).
+    system = casadi.Function('generalized_alpha_newton', ...
+        {z, time, h, e_n, increment_base, ed_base}, {Residual, H});
+catch cause
+    failure = MException('generalized_alpha_integrator:CasadiGraphFailed', ...
+        ['Cannot build the CasADi Newton graph. RHS must support CasADi MX ', ...
+         'inputs (or provide options.CasadiRHS). No numerical-difference ', ...
+         'or fixed-point fallback is used. Cause: %s'], cause.message);
+    failure = addCause(failure, cause);
+    throw(failure);
+end
 end
 
 function configurationNext = local_update_configuration( ...
@@ -247,7 +316,6 @@ if isempty(opts.quaternionIndices)
     return;
 end
 
-configurationNext = configuration;
 quaternionIndices = opts.quaternionIndices;
 quaternion = configuration(quaternionIndices);
 quaternion = quaternion / norm(quaternion);
@@ -256,24 +324,34 @@ rotationIncrement = increment(opts.angularVelocityIndices);
 deltaQuaternion = local_rotation_vector_quaternion(rotationIncrement);
 quaternionNext = local_quaternion_product(quaternion, deltaQuaternion);
 quaternionNext = quaternionNext / norm(quaternionNext);
-if quaternionNext.' * quaternion < 0
+if isa(quaternionNext, 'casadi.MX') || isa(quaternionNext, 'casadi.SX')
+    quaternionNext = if_else(quaternionNext.' * quaternion < 0, ...
+        -quaternionNext, quaternionNext);
+elseif quaternionNext.' * quaternion < 0
     quaternionNext = -quaternionNext;
 end
-configurationNext(quaternionIndices) = quaternionNext;
-
 midQuaternion = local_quaternion_product(quaternion, ...
     local_rotation_vector_quaternion(0.5 * rotationIncrement));
 midRotation = get_rotation_matrix_quaternion(midQuaternion);
 translationIncrement = increment(opts.linearVelocityIndices);
-configurationNext(opts.translationIndices) = ...
+% Concatenation avoids mutating the original MX input through handle aliasing.
+configurationNext = [quaternionNext;
     configuration(opts.translationIndices) + midRotation * translationIncrement;
-
-configurationNext(opts.additivePositionIndices) = ...
-    configuration(opts.additivePositionIndices) + ...
-    increment(opts.additiveVelocityIndices);
+    configuration(opts.additivePositionIndices) + increment(opts.additiveVelocityIndices)];
 end
 
 function quaternion = local_rotation_vector_quaternion(rotationVector)
+if isa(rotationVector, 'casadi.MX') || isa(rotationVector, 'casadi.SX')
+    angleSquared = rotationVector.' * rotationVector;
+    small = angleSquared < 1e-16;
+    safeAngle = sqrt(if_else(small, 1, angleSquared));
+    scale = if_else(small, 0.5 - angleSquared/48 + angleSquared^2/3840, ...
+        sin(0.5 * safeAngle)/safeAngle);
+    scalar = if_else(small, 1 - angleSquared/8 + angleSquared^2/384, ...
+        cos(0.5 * safeAngle));
+    quaternion = [scalar; scale * rotationVector];
+    return;
+end
 angle = norm(rotationVector);
 if angle < 1e-10
     scale = 0.5 - angle^2 / 48;
@@ -314,8 +392,11 @@ opts.absoluteTolerance = local_option(options, ...
     {'AbsTol', 'absoluteTolerance'}, 1e-10);
 opts.maxSubdivisions = local_option(options, ...
     {'MaxSubdivisions', 'maxSubdivisions'}, 8);
-opts.minRelaxation = local_option(options, ...
-    {'MinRelaxation', 'minRelaxation'}, 0.05);
+opts.casadiRHS = local_option(options, {'CasadiRHS'}, []);
+if ~isempty(opts.casadiRHS) && ~isa(opts.casadiRHS, 'function_handle') && ...
+        ~isa(opts.casadiRHS, 'casadi.Function')
+    error('CasadiRHS must be a function handle or a casadi.Function.');
+end
 
 defaultStep = min(diff(tspan));
 opts.maxStep = local_option(options, {'MaxStep', 'StepSize'}, defaultStep);
@@ -373,8 +454,6 @@ validateattributes(opts.absoluteTolerance, {'numeric'}, ...
     {'scalar', 'real', 'finite', 'positive'});
 validateattributes(opts.maxSubdivisions, {'numeric'}, ...
     {'scalar', 'integer', '>=', 0});
-validateattributes(opts.minRelaxation, {'numeric'}, ...
-    {'scalar', 'real', 'finite', '>', 0, '<=', 1});
 validateattributes(opts.maxStep, {'numeric'}, ...
     {'scalar', 'real', 'finite', 'positive'});
 validateattributes(opts.positionSize, {'numeric'}, ...
@@ -537,6 +616,9 @@ end
 for i = 1:numel(modalIndices)
     indices = modalIndices{i};
     if ~isempty(indices)
+        if is_casadi_type(values{i}) && ~is_casadi_type(vector)
+            vector = vector + 0 * values{i}(1);
+        end
         vector(indices) = values{i}(:);
     end
 end
@@ -549,12 +631,12 @@ else
     value = forceInput;
 end
 if isscalar(value)
-    tau = zeros(NB, 1);
+    tau = zeros(NB, 1) + 0 * value;
     tau(~fixedJoint) = value;
 else
     tau = value(:);
 end
-if numel(tau) ~= NB || any(~isfinite(tau))
+if numel(tau) ~= NB || (~is_casadi_type(tau) && any(~isfinite(tau)))
     error('forceInput returned an invalid torque vector at t=%.9g.', t);
 end
 end
@@ -577,7 +659,7 @@ end
 
 function vector = local_state_modal_vector(values, modalIndices, nEta)
 if iscell(values)
-    vector = zeros(nEta, 1);
+vector = zeros(nEta, 1);
     for i = 1:numel(modalIndices)
         if ~isempty(modalIndices{i})
             vector(modalIndices{i}) = values{i}(:);

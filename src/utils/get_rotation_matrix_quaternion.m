@@ -1,10 +1,11 @@
 function A = get_rotation_matrix_quaternion(q)
 
-    if ~isnumeric(q) || ~isreal(q) || ~isvector(q) || numel(q) ~= 4
+    symbolic = is_casadi_type(q);
+    if numel(q) ~= 4 || (~symbolic && (~isnumeric(q) || ~isreal(q) || ~isvector(q)))
         error('q has to be a real 4D quaternion vector (4x1 or 1x4).');
     end
 
-    if any(~isfinite(q))
+    if ~symbolic && any(~isfinite(q))
         error('q cannot contain Inf or NaN.');
     end
 
@@ -12,7 +13,7 @@ function A = get_rotation_matrix_quaternion(q)
 
     norm_q = norm(q);
 
-    if norm_q < eps
+    if ~symbolic && norm_q < eps
         error('q cannot be a zero quaternion.');
     end
 

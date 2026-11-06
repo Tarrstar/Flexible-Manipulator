@@ -8,7 +8,7 @@ srcDir = fileparts(fileparts(testDir));
 projectDir = fileparts(srcDir);
 refDir = fullfile(projectDir, 'refs', 'spatial_v2.1');
 addpath(genpath(refDir), fullfile(srcDir, 'classes'), ...
-        fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'utils'));
+        fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'kinematics'), fullfile(srcDir, 'utils'));
 
 n = 7;
 body = cell(n, 1);

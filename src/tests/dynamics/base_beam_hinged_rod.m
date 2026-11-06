@@ -10,7 +10,7 @@ if ~exist(dataDir, 'dir')
     mkdir(dataDir);
 end
 
-addpath(fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'classes'), ...
+addpath(fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'kinematics'), fullfile(srcDir, 'classes'), ...
     fullfile(srcDir, 'utils'), fullfile(testDir, 'support'));
 
 %% Flexible beam: same properties as flexible_base_manipulator.m

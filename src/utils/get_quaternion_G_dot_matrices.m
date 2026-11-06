@@ -1,11 +1,12 @@
 function [G_dot, G_bar_dot] = get_quaternion_G_dot_matrices(theta_dot)
 
-    if ~isnumeric(theta_dot) || ~isreal(theta_dot) || ...
-            ~isvector(theta_dot) || numel(theta_dot) ~= 4
+    symbolic = is_casadi_type(theta_dot);
+    if numel(theta_dot) ~= 4 || (~symbolic && ...
+            (~isnumeric(theta_dot) || ~isreal(theta_dot) || ~isvector(theta_dot)))
         error('theta_dot must be a real 4D vector.');
     end
 
-    if any(~isfinite(theta_dot))
+    if ~symbolic && any(~isfinite(theta_dot))
         error('theta_dot cannot contain Inf or NaN.');
     end
 

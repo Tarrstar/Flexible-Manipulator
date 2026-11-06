@@ -10,7 +10,7 @@ projectDir = fileparts(srcDir);
 refDir = fullfile(projectDir, 'refs', 'spatial_v2.1');
 
 addpath(genpath(refDir), fullfile(srcDir, 'classes'), ...
-        fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'utils'));
+        fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'kinematics'), fullfile(srcDir, 'utils'));
 
 %% Seven rigid RigidBody links
 n = 7;

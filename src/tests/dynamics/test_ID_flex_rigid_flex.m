@@ -6,7 +6,7 @@ thisFile = mfilename('fullpath');
 testDir = fileparts(thisFile);
 srcDir = fileparts(fileparts(testDir));
 supportDir = fullfile(testDir, 'support');
-addpath(fullfile(srcDir, 'classes'), fullfile(srcDir, 'dynamics'), ...
+addpath(fullfile(srcDir, 'classes'), fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'kinematics'), ...
         fullfile(srcDir, 'utils'), supportDir);
 
 %% Build a rigid link with directly specified inertia

@@ -36,11 +36,11 @@ arm_bodies = []
 
 arm_position = 0.0
 for i, length in enumerate(arm_lengths):
-    mass = 0.8 + 0.1 * (i + 1)
+    mass = 0.8
     inertia_diag = np.array([
-        0.02 + 0.003 * (i + 1),
-        0.03 + 0.004 * (i + 1),
-        0.04 + 0.005 * (i + 1),
+        0.02,
+        0.03,
+        0.04,
     ])
     inertia = RigidBodyInertia(
         mass=mass,
@@ -116,7 +116,7 @@ section_data.inertia = beam_density * np.diag([
 ])
 
 arm_tip = float(np.sum(arm_lengths))
-n_beam_elements = 32
+n_beam_elements = 16
 element_length = beam_length / n_beam_elements
 node_beam_base = None
 node_beam_tip = None
@@ -209,12 +209,13 @@ def record_tip(mbs_local, t):
     ])
 
 
-def pre_step_user(mbs_local, t):
+def post_step_user(mbs_local, t):
     record_tip(mbs_local, t)
     return True
 
 
-mbs.SetPreStepUserFunction(pre_step_user)
+# Record the converged state at t; a pre-step callback sees the previous state.
+mbs.SetPostStepUserFunction(post_step_user)
 mbs.Assemble()
 record_tip(mbs, 0.0)
 

@@ -392,7 +392,8 @@ classdef FlexBody < handle
                 error('qdot must have %d elements.', nq);
             end
         
-            if any(~isfinite(q)) || any(~isfinite(qdot))
+            if (~is_casadi_type(q) && any(~isfinite(q))) || ...
+                    (~is_casadi_type(qdot) && any(~isfinite(qdot)))
                 error('q and qdot cannot contain Inf or NaN.');
             end
         
@@ -437,6 +438,69 @@ classdef FlexBody < handle
             Qv = [Qv_theta;
                   Qv_R;
                   Qv_f];
+        end
+
+        function [Irr, Ire, Mee, C, c] = update_matrices(obj, v, eta, eta_d)
+         
+            if ~is_casadi_type(v)
+                validateattributes(v, {'numeric'}, {'real', 'finite', 'vector', 'numel', 6});
+            end
+            if ~is_casadi_type(eta)
+                validateattributes(eta, {'numeric'}, {'real', 'finite', 'numel', obj.nEta});
+            end
+            if ~is_casadi_type(eta_d)
+                validateattributes(eta_d, {'numeric'}, {'real', 'finite', 'numel', obj.nEta});
+            end
+            assert(numel(v) == 6 && numel(eta) == obj.nEta && numel(eta_d) == obj.nEta, ...
+                'Floating-frame input dimensions are incorrect.');
+            v = v(:); eta = eta(:); eta_d = eta_d(:);
+            omega = v(1:3); u = v(4:6);
+            W = get_skew_sym_matrix(omega); W2 = W * W;
+            omegaCrossU = W * u;
+            qAug = [1; eta]; qAugDot = [0; eta_d];
+        
+            % Reuse each product contraction for J, Jdot, H and the elastic bias.
+            % shapeProducts{k,l} = integral [u0_k; S_k']*[u0_l, S_l] dm.
+            zero = 0 * v(1) + 0 * qAug(1);
+            secondMoment = repmat(zero, 3, 3);
+            secondMomentDot = repmat(zero, 3, 3);
+            shapePosition = cell(3, 3);
+            c = obj.S_bar.' * omegaCrossU;
+            for k = 1:3
+                for l = 1:3
+                    product = obj.shapeProducts{k, l};
+                    positionProduct = product * qAug;
+                    velocityProduct = product * qAugDot;
+                    secondMoment(k, l) = qAug.' * positionProduct;
+                    secondMomentDot(k, l) = qAugDot.' * positionProduct ...
+                        + qAug.' * velocityProduct;
+                    shapePosition{k, l} = reshape(positionProduct(2:end), obj.nEta, 1);
+                    shapeVelocity = reshape(velocityProduct(2:end), obj.nEta, 1);
+                    c = c + W2(k, l) * shapePosition{k, l} ...
+                        + 2 * W(k, l) * shapeVelocity;
+                end
+            end
+            J = trace(secondMoment) * eye(3) - secondMoment;
+            J = 0.5 * (J + J.');
+            Jdot = trace(secondMomentDot) * eye(3) - secondMomentDot;
+            Jdot = 0.5 * (Jdot + Jdot.');
+            H = repmat(zero, 3, obj.nEta);
+            H(1, :) = reshape(shapePosition{3, 2} - shapePosition{2, 3}, 1, obj.nEta);
+            H(2, :) = reshape(shapePosition{1, 3} - shapePosition{3, 1}, 1, obj.nEta);
+            H(3, :) = reshape(shapePosition{2, 1} - shapePosition{1, 2}, 1, obj.nEta);
+            s = obj.S_t0 + obj.S_bar * eta;
+            sTilde = get_skew_sym_matrix(s);
+        
+            Irr = [J, sTilde; -sTilde, obj.mass * eye(3)];
+            Ire = [H; obj.S_bar];
+            Mee = obj.M_ff;
+            % Equivalent to IrrDot*v + crf(v)*(Irr*v + Ire*eta_d).
+            % IreDot*eta_d = integral (S*eta_d) x (S*eta_d) dm = 0.
+            C = [Jdot * omega + W * (J * omega + H * eta_d) ...
+                     + sTilde * omegaCrossU;
+                 obj.mass * omegaCrossU + W2 * s ...
+                     + 2 * W * (obj.S_bar * eta_d)];
+            c = c + obj.K_ff * eta + obj.D_ff * eta_d;
         end
     end
 
@@ -549,7 +613,7 @@ classdef FlexBody < handle
                 error('q must have %d elements.', nq);
             end
 
-            if any(~isfinite(q))
+            if ~is_casadi_type(q) && any(~isfinite(q))
                 error('q cannot contain Inf or NaN.');
             end
 
@@ -557,7 +621,7 @@ classdef FlexBody < handle
             R = q(5:7);
             eta = q(8:end);
 
-            if abs(norm(theta) - 1) > 1e-8
+            if ~is_casadi_type(theta) && abs(norm(theta) - 1) > 1e-8
                 error('q(1:4) must be a unit quaternion.');
             end
         end

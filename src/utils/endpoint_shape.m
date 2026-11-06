@@ -11,4 +11,6 @@ if ~is_flexible_link(model, parent)
     Phi = zeros(6, 0);
     return;
 end
+assert(size(Phi,1)==6 && size(Phi,2)==nEta, ...
+    'Endpoint map must be 6-by-number-of-parent-modes.');
 end

@@ -14,7 +14,7 @@ if ~isfile(fullfile(spatialDir, 'dynamics', 'FDfb.m'))
 end
 
 addpath(genpath(spatialDir), fullfile(srcDir, 'classes'), ...
-    fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'utils'));
+    fullfile(srcDir, 'dynamics'), fullfile(srcDir, 'kinematics'), fullfile(srcDir, 'utils'));
 
 %% Equivalent rigid floating base
 beam.length = 1.0;

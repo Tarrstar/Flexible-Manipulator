@@ -2,6 +2,16 @@ function [qdd, eta_dd] = FD_flex(model, q, qd, tau, eta, eta_d, f_ext)
 
 NB = model.NB;
 
+% Optional reference implementation for equivalence/performance testing.
+frameTerms = @floating_frame_terms;
+if isfield(model, 'floating_frame_terms_function') && ...
+        ~isempty(model.floating_frame_terms_function)
+    frameTerms = model.floating_frame_terms_function;
+    if ~isa(frameTerms, 'function_handle')
+        error('model.floating_frame_terms_function must be a function handle.');
+    end
+end
+
 q = q(:); qd = qd(:); tau = tau(:);
 
 fixedJoint = false(NB, 1);
@@ -62,11 +72,14 @@ for i = 1:NB
         end
         Xup{i} = XJ * XdefParent * model.Xtree{i};
         vParent = Xup{i} * v{p};
-        edgeR{i} = spatial_rotation(Xup{i});
+        edgeR{i} = XJ * spatial_rotation(XdefParent * model.Xtree{i});
         if is_flexible_link(model, p)
             vFlexParent = edgeR{i} * edgeB{i} * etaDotState{p};
+            vFlexPreJoint = spatial_rotation(XdefParent * model.Xtree{i}) ...
+                * edgeB{i} * etaDotState{p};
         else
             vFlexParent = zeros(6, 1);
+            vFlexPreJoint = zeros(6, 1);
         end
     else
         Xup{i} = XJ * model.Xtree{i};
@@ -74,16 +87,17 @@ for i = 1:NB
         edgeR{i} = spatial_rotation(Xup{i});
         edgeB{i} = zeros(6, 0);
         vFlexParent = zeros(6, 1);
+        vFlexPreJoint = zeros(6, 1);
     end
 
     vJ = S{i} * qd(i) + vFlexParent;
     v{i} = vParent + vJ;
-    gamma{i} = crm(v{i}) * vJ;
+    gamma{i} = flex_connection_bias(v{i}, vJ, vFlexParent, XJ, vFlexPreJoint);
 
     if is_flexible_link(model, i)
         body = local_body(model, i, true);
         [Irr{i}, Ire{i}, Mee{i}, C{i}, c{i}] = ...
-            floating_frame_terms(body, v{i}, eta_i, eta_d_i);
+            frameTerms(body, v{i}, eta_i, eta_d_i);
     else
         body = local_body(model, i, false);
         Irr{i} = body.get_spatial_inertia();
@@ -144,9 +158,9 @@ for k = NB:-1:1
     Irrp{j} = Irrp{j} + X.' * Kg * X;
     Cp{j} = Cp{j} + X.' * Wg{k};
     if is_flexible_link(model, j)
-        % B maps directly to the parent endpoint twist. The endpoint
-        % translation is already represented by X, so the elastic side
-        % of the coupling uses a rotation-only transform.
+        % B maps the parent endpoint twist. The elastic mapping rotates it
+        % into the child and also shifts its origin for a prismatic XJ.
+        % The nominal Xtree translation must not be applied a second time.
         RB = edgeR{k} * edgeB{k};
         Irep{j} = Irep{j} + X.' * Kg * RB;
         Ierp{j} = Irep{j}.';
@@ -157,7 +171,7 @@ end
 
 % Forward pass (Pass 3: Accelerations)
 baseAccel = -a_grav;
-qdd = zeros(NB, 1);
+qdd = 0 * q; % Retain symbolic type when tracing the dynamics with CasADi.
 eta_dd = cell(NB, 1);
 aLink = cell(NB, 1);
 

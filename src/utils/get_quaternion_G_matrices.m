@@ -1,12 +1,13 @@
 function [G, G_bar] = get_quaternion_G_matrices(q)
 
-    if ~isnumeric(q) || ~isreal(q) || ...
-            ~isvector(q) || numel(q) ~= 4
+    symbolic = is_casadi_type(q);
+    if numel(q) ~= 4 || (~symbolic && ...
+            (~isnumeric(q) || ~isreal(q) || ~isvector(q)))
         error(['q must be a real 4D Euler-parameter vector ', ...
                '(4x1 or 1x4).']);
     end
 
-    if any(~isfinite(q))
+    if ~symbolic && any(~isfinite(q))
         error('q cannot contain Inf or NaN.');
     end
 

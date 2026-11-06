@@ -177,7 +177,7 @@ end
 % Floating-base solve and Pass 3 initialization
 aLink0 = Kp{1} \ (baseWrench - bp{1});
 base_accel = aLink0 + a_grav;
-qdd = zeros(NB, 1);
+qdd = 0 * q; % Retain symbolic type when tracing the dynamics with CasADi.
 eta_dd = cell(NB, 1);
 aLink = cell(NB, 1);
 aLink{1} = aLink0;
@@ -224,4 +224,3 @@ else
     value = defaultValue;
 end
 end
-

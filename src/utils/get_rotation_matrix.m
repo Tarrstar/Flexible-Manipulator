@@ -1,14 +1,17 @@
 function A = get_rotation_matrix(v, theta)
-    if ~isnumeric(v) || ~isreal(v) || ~isvector(v) || numel(v) ~= 3
+    symbolicAxis = is_casadi_type(v);
+    symbolicAngle = is_casadi_type(theta);
+    if numel(v) ~= 3 || (~symbolicAxis && ...
+            (~isnumeric(v) || ~isreal(v) || ~isvector(v)))
         error('v has to be a 3d vector(3×1 or 1×3)');
     end
 
-    if ~isnumeric(theta) || ~isreal(theta) || ~isscalar(theta) || ...
-            ~isfinite(theta)
+    if numel(theta) ~= 1 || (~symbolicAngle && ...
+            (~isnumeric(theta) || ~isreal(theta) || ~isfinite(theta)))
         error('theta has to be a finite real unmber, its unit is rad');
     end
 
-    if any(~isfinite(v))
+    if ~symbolicAxis && any(~isfinite(v))
         error('v cannot contain Inf or NaN');
     end
 
@@ -16,7 +19,7 @@ function A = get_rotation_matrix(v, theta)
 
     norm_v = norm(v);
 
-    if norm_v < eps
+    if ~symbolicAxis && norm_v < eps
         error('v cannot be a zero vector');
     end
 
